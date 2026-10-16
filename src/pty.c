@@ -4,7 +4,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 
 #ifndef _WIN32
 #include <sys/ioctl.h>
@@ -187,35 +189,6 @@ bool conpty_init() {
   return true;
 }
 
-// convert argv to cmdline for CreateProcessW
-static WCHAR *join_args(char **argv) {
-  char *args = NULL;
-  char **ptr = argv;
-  for (; *ptr; ptr++) {
-    char *quoted = (char *) quote_arg(*ptr);
-    size_t arg_len = args == NULL ? 1 : strlen(args) + 1;
-    size_t quoted_len = strlen(quoted);
-    args = xrealloc(args, arg_len + quoted_len);
-    if (arg_len == 1) memset(args, 0, 2);
-    if (arg_len != 1) strcat(args, " ");
-    strncat(args, quoted, quoted_len);
-    if (quoted != *ptr) free(quoted);
-  }
-
-  int len = MultiByteToWideChar(CP_UTF8, 0, args, -1, NULL, 0);
-  if (len <= 0) goto failed;
-  WCHAR *ws = (WCHAR *) xmalloc(len * sizeof(WCHAR));
-  if (len != MultiByteToWideChar(CP_UTF8, 0, args, -1, ws, len)) {
-    free(ws);
-    goto failed;
-  }
-  return ws;
-
-failed:
-  if (args != NULL) free(args);
-  return NULL;
-}
-
 static WCHAR *to_utf16(char *str) {
   int len = MultiByteToWideChar(CP_UTF8, 0, str, -1, NULL, 0);
   if (len <= 0) return NULL;
@@ -226,6 +199,23 @@ static WCHAR *to_utf16(char *str) {
   }
   wstr[len] = L'\0';
   return wstr;
+}
+
+// convert argv to cmdline for CreateProcessW
+static WCHAR *join_args(char **argv) {
+  char args[256] = {0};
+  char **ptr = argv;
+  for (; *ptr; ptr++) {
+    char *quoted = (char *) quote_arg(*ptr);
+    size_t arg_len = strlen(args) + 1;
+    size_t quoted_len = strlen(quoted);
+    if (arg_len == 1) memset(args, 0, 2);
+    if (arg_len != 1) strcat(args, " ");
+    strncat(args, quoted, quoted_len);
+    if (quoted != *ptr) free(quoted);
+  }
+  if (args[255] != '\0') args[255] = '\0';  // truncate
+  return to_utf16(args);
 }
 
 static bool conpty_setup(HPCON *hnd, COORD size, STARTUPINFOEXW *si_ex, char **in_name, char **out_name) {
@@ -241,6 +231,7 @@ static bool conpty_setup(HPCON *hnd, COORD size, STARTUPINFOEXW *si_ex, char **i
   bool ret = false;
 
   sa.nLength = sizeof(sa);
+
   snprintf(buf, sizeof(buf), "\\\\.\\pipe\\ttyd-term-in-%d-%d", pid, count);
   *in_name = strdup(buf);
   snprintf(buf, sizeof(buf), "\\\\.\\pipe\\ttyd-term-out-%d-%d", pid, count);
@@ -292,7 +283,12 @@ done:
   return ret;
 }
 
-static void connect_cb(uv_connect_t *req, int status) { free(req); }
+static void connect_cb(uv_connect_t *req, int status) {
+  if (status != 0) {
+    fprintf(stderr, "connect_cb: pipe connect failed: %s\n", uv_strerror(status));
+  }
+  free(req);
+}
 
 static void CALLBACK conpty_exit(void *context, BOOLEAN unused) {
   pty_process *process = (pty_process *) context;
@@ -335,7 +331,7 @@ int pty_spawn(pty_process *process, pty_read_cb read_cb, pty_exit_cb exit_cb) {
   uv_pipe_connect(out_req, process->out, out_name, connect_cb);
 
   PROCESS_INFORMATION pi = {0};
-  WCHAR *cmdline, *cwd;
+  WCHAR *cmdline = NULL, *cwd = NULL;
   cmdline = join_args(process->argv);
   if (cmdline == NULL) goto cleanup;
   if (process->envp != NULL) {

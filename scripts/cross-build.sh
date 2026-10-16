@@ -10,17 +10,17 @@ STAGE_ROOT="${STAGE_ROOT:-/opt/stage}"
 BUILD_ROOT="${BUILD_ROOT:-/opt/build}"
 BUILD_TARGET="${BUILD_TARGET:-x86_64}"
 
-ZLIB_VERSION="${ZLIB_VERSION:-1.2.13}"
-JSON_C_VERSION="${JSON_C_VERSION:-0.16}"
-MBEDTLS_VERSION="${MBEDTLS_VERSION:-2.28.1}"
-LIBUV_VERSION="${LIBUV_VERSION:-1.44.2}"
-LIBWEBSOCKETS_VERSION="${LIBWEBSOCKETS_VERSION:-4.3.2}"
+ZLIB_VERSION="${ZLIB_VERSION:-1.3.2}"
+JSON_C_VERSION="${JSON_C_VERSION:-0.18}"
+OPENSSL_VERSION="${OPENSSL_VERSION:-3.6.1}"
+LIBUV_VERSION="${LIBUV_VERSION:-1.52.1}"
+LIBWEBSOCKETS_VERSION="${LIBWEBSOCKETS_VERSION:-4.5.7}"
 
 build_zlib() {
     echo "=== Building zlib-${ZLIB_VERSION} (${TARGET})..."
     curl -fSsLo- "https://zlib.net/zlib-${ZLIB_VERSION}.tar.gz" | tar xz -C "${BUILD_DIR}"
     pushd "${BUILD_DIR}"/zlib-"${ZLIB_VERSION}"
-        env CHOST="${TARGET}" ./configure --static --archs="-fPIC" --prefix="${STAGE_DIR}"
+        env CHOST="${TARGET}" ./configure --static --archs="-fPIC" --prefix="${STAGE_DIR}" --disable-crcvx
         make -j"$(nproc)" install
     popd
 }
@@ -41,17 +41,37 @@ build_json-c() {
     popd
 }
 
-build_mbedtls() {
-    echo "=== Building mbedtls-${MBEDTLS_VERSION} (${TARGET})..."
-    curl -fSsLo- "https://github.com/ARMmbed/mbedtls/archive/v${MBEDTLS_VERSION}.tar.gz" | tar xz -C "${BUILD_DIR}"
-    pushd "${BUILD_DIR}/mbedtls-${MBEDTLS_VERSION}"
-        rm -rf build && mkdir -p build && cd build
-        cmake -DCMAKE_TOOLCHAIN_FILE="${BUILD_DIR}/cross-${TARGET}.cmake" \
-            -DCMAKE_BUILD_TYPE=RELEASE \
-            -DCMAKE_INSTALL_PREFIX="${STAGE_DIR}" \
-            -DENABLE_TESTING=OFF \
-            ..
-        make -j"$(nproc)" install
+map_openssl_target() {
+    case $1 in
+        i686) echo linux-generic32 ;;
+        x86_64) echo linux-x86_64 ;;
+        arm|armhf|armv7l) echo linux-armv4 ;;
+        aarch64) echo linux-aarch64 ;;
+        mips|mipsel) echo linux-mips32 ;;
+        mips64|mips64el) echo linux64-mips64 ;;
+        powerpc64) echo linux-ppc64 ;;
+        powerpc64le) echo linux-ppc64le ;;
+        s390x) echo linux64-s390x ;;
+        win32) echo mingw64 ;;
+        *) echo "unknown openssl target: $1" && exit 1
+    esac
+}
+
+build_openssl() {
+    openssl_target=$(map_openssl_target "${BUILD_TARGET}")
+    echo "=== Building openssl-${OPENSSL_VERSION} (${openssl_target})..."
+    curl -sLo- "https://www.openssl.org/source/openssl-${OPENSSL_VERSION}.tar.gz" | tar xz -C "${BUILD_DIR}"
+    pushd "${BUILD_DIR}/openssl-${OPENSSL_VERSION}"
+        openssl_cflags="-fPIC -latomic"
+        case ${BUILD_TARGET} in
+            s390x) openssl_cflags="${openssl_cflags} -march=z10" ;;
+            win32)
+                curl -sLo- https://github.com/openssl/openssl/pull/29826.patch | patch -p1
+                ;;
+        esac
+        env CC=gcc CROSS_COMPILE="${TARGET}-" CFLAGS="${openssl_cflags}" \
+            ./Configure "${openssl_target}" no-ssl3 no-err -DOPENSSL_SMALL_FOOTPRINT --prefix="${STAGE_DIR}" \
+        && make -j"$(nproc)" all > /dev/null && make install_sw
     popd
 }
 
@@ -86,7 +106,6 @@ build_libwebsockets() {
     curl -fSsLo- "https://github.com/warmcat/libwebsockets/archive/v${LIBWEBSOCKETS_VERSION}.tar.gz" | tar xz -C "${BUILD_DIR}"
     pushd "${BUILD_DIR}/libwebsockets-${LIBWEBSOCKETS_VERSION}"
         sed -i 's/ websockets_shared//g' cmake/libwebsockets-config.cmake.in
-        sed -i '/PC_OPENSSL/d' lib/tls/CMakeLists.txt
         rm -rf build && mkdir -p build && cd build
         cmake -DCMAKE_TOOLCHAIN_FILE="${BUILD_DIR}/cross-${TARGET}.cmake" \
             -DCMAKE_BUILD_TYPE=RELEASE \
@@ -94,21 +113,30 @@ build_libwebsockets() {
             -DCMAKE_FIND_LIBRARY_SUFFIXES=".a" \
             -DCMAKE_EXE_LINKER_FLAGS="-static" \
             -DLWS_WITHOUT_TESTAPPS=ON \
-            -DLWS_WITH_MBEDTLS=ON \
+            -DLWS_WITH_SSL=ON \
             -DLWS_WITH_LIBUV=ON \
             -DLWS_STATIC_PIC=ON \
             -DLWS_WITH_SHARED=OFF \
             -DLWS_UNIX_SOCK=ON \
             -DLWS_IPV6=ON \
             -DLWS_ROLE_RAW_FILE=OFF \
-            -DLWS_WITH_HTTP2=OFF \
+            -DLWS_WITH_HTTP2=ON \
             -DLWS_WITH_HTTP_BASIC_AUTH=OFF \
+            -DLWS_WITH_HTTP_STREAM_COMPRESSION=ON \
             -DLWS_WITH_UDP=OFF \
             -DLWS_WITHOUT_CLIENT=ON \
+            -DLWS_WITHOUT_EXTENSIONS=OFF \
             -DLWS_WITH_LEJP=OFF \
             -DLWS_WITH_LEJP_CONF=OFF \
             -DLWS_WITH_LWSAC=OFF \
             -DLWS_WITH_SEQUENCER=OFF \
+            -DLWS_WITH_UPNG=OFF \
+            -DLWS_WITH_JPEG=OFF \
+            -DLWS_WITH_DLO=OFF \
+            -DLWS_WITH_SYS_STATE=OFF \
+            -DLWS_WITH_SYS_SMD=OFF \
+            -DLWS_WITH_SECURE_STREAMS=OFF \
+            -DLWS_CTEST_INTERNET_AVAILABLE=OFF \
             ..
         make -j"$(nproc)" install
     popd
@@ -143,7 +171,7 @@ build() {
 
     echo "=== Installing toolchain ${ALIAS} (${TARGET})..."
 
-    mkdir -p "${CROSS_ROOT}" && export PATH="${PATH}:/opt/cross/bin"
+    mkdir -p "${CROSS_ROOT}" && export PATH="${PATH}:${CROSS_ROOT}/bin"
     curl -fSsLo- "${MUSL_CC_URL}/${TARGET}-cross.tgz" | tar xz -C "${CROSS_ROOT}" --strip-components=${COMPONENTS}
 
     echo "=== Building target ${ALIAS} (${TARGET})..."
@@ -157,7 +185,7 @@ build() {
     build_zlib
     build_json-c
     build_libuv
-    build_mbedtls
+    build_openssl
     build_libwebsockets
     build_ttyd
 }
@@ -166,10 +194,12 @@ case ${BUILD_TARGET} in
     amd64) BUILD_TARGET="x86_64" ;;
     arm64) BUILD_TARGET="aarch64" ;;
     armv7) BUILD_TARGET="armv7l" ;;
+    ppc64) BUILD_TARGET="powerpc64" ;;
+    ppc64le) BUILD_TARGET="powerpc64le" ;;
 esac
 
 case ${BUILD_TARGET} in
-    i686|x86_64|aarch64|mips|mipsel|mips64|mips64el|s390x)
+    i686|x86_64|aarch64|mips|mipsel|mips64|mips64el|powerpc64|powerpc64le|s390x)
         build "${BUILD_TARGET}-linux-musl" "${BUILD_TARGET}"
         ;;
     arm)

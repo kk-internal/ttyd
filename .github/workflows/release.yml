@@ -2,36 +2,27 @@ name: release
 
 on:
   push:
-    tags:
-    - "*"
+    tags: ["*"]
 
 jobs:
   build:
-    runs-on: ubuntu-20.04
-    strategy:
-      fail-fast: false
-      matrix:
-        target: [i686, x86_64, arm, armhf, aarch64, mips, mipsel, mips64, mips64el, s390x, win32]
-    steps:
-      - uses: actions/checkout@v3
-      - name: Install packages
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y autoconf automake build-essential cmake curl file libtool
-      - name: Cross build (${{ matrix.target }})
-        env:
-          BUILD_TARGET: ${{ matrix.target }}
-        run: ./scripts/cross-build.sh
-      - uses: actions/upload-artifact@v3
-        with:
-          name: ttyd.${{ matrix.target }}
-          path: build/ttyd*
+    uses: ./.github/workflows/backend.yml
   publish:
     needs: [build]
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/download-artifact@v3
+      - uses: actions/checkout@v6
+      - name: Check version bump
+        run: |
+          TAG=$(git describe --tags --match "[0-9]*.[0-9]*.[0-9]*" --abbrev=8)
+          VERSION=$(grep project CMakeLists.txt| awk '{print $3}')
+          if [ "$TAG" != "$VERSION" ]; then
+            echo "=== Version in CMakeLists.txt and git tag does not match!"
+            echo "=== Git Tag: $TAG, Version: $VERSION"
+            exit 1
+          fi
+      - uses: actions/download-artifact@v8
+        
       - run: |
           mkdir build
           for file in ttyd.*/*; do
@@ -39,6 +30,7 @@ jobs:
             [[ $file == *.exe ]] && target="$target.exe"
             mv $file build/$target
           done
+          pushd build; sha256sum ttyd.* > SHA256SUMS; popd
       - uses: ncipollo/release-action@v1
         with:
           artifacts: build/*

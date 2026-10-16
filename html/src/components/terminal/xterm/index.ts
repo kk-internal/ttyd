@@ -1,14 +1,18 @@
 import { bind } from 'decko';
-import { IDisposable, ITerminalOptions, Terminal } from 'xterm';
-import { CanvasAddon } from 'xterm-addon-canvas';
-import { WebglAddon } from 'xterm-addon-webgl';
-import { FitAddon } from 'xterm-addon-fit';
-import { WebLinksAddon } from 'xterm-addon-web-links';
-import { ImageAddon } from 'xterm-addon-image';
+import type { IDisposable, ITerminalOptions } from '@xterm/xterm';
+import { Terminal } from '@xterm/xterm';
+import { CanvasAddon } from '@xterm/addon-canvas';
+import { ClipboardAddon } from '@xterm/addon-clipboard';
+import { WebglAddon } from '@xterm/addon-webgl';
+import { FitAddon } from '@xterm/addon-fit';
+import { WebLinksAddon } from '@xterm/addon-web-links';
+import { ImageAddon } from '@xterm/addon-image';
+import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { OverlayAddon } from './addons/overlay';
+import { TouchAddon } from './addons/touch';
 import { ZmodemAddon } from './addons/zmodem';
 
-import 'xterm/css/xterm.css';
+import '@xterm/xterm/css/xterm.css';
 
 interface TtydTerminal extends Terminal {
     fit(): void;
@@ -20,7 +24,7 @@ declare global {
     }
 }
 
-const enum Command {
+enum Command {
     // server side
     OUTPUT = '0',
     SET_WINDOW_TITLE = '1',
@@ -44,6 +48,10 @@ export interface ClientOptions {
     enableTrzsz: boolean;
     enableSixel: boolean;
     titleFixed?: string;
+    isWindows: boolean;
+    trzszDragInitTimeout: number;
+    unicodeVersion: string;
+    closeOnDisconnect: boolean;
 }
 
 export interface FlowControl {
@@ -79,6 +87,9 @@ export class Xterm {
     private terminal: Terminal;
     private fitAddon = new FitAddon();
     private overlayAddon = new OverlayAddon();
+    private clipboardAddon = new ClipboardAddon();
+    private webLinksAddon = new WebLinksAddon();
+    private touchAddon = new TouchAddon();
     private webglAddon?: WebglAddon;
     private canvasAddon?: CanvasAddon;
     private zmodemAddon?: ZmodemAddon;
@@ -88,13 +99,19 @@ export class Xterm {
     private opened = false;
     private title?: string;
     private titleFixed?: string;
-    private resizeOverlay = true;
+    // KK: the size overlay pops up every time the soft keyboard opens/closes, hide it on touch devices
+    private isTouch = window.matchMedia('(pointer: coarse)').matches;
+    private resizeOverlay = !this.isTouch;
     private reconnect = true;
     private doReconnect = true;
+    private closeOnDisconnect = false;
 
     private writeFunc = (data: ArrayBuffer) => this.writeData(new Uint8Array(data));
 
-    constructor(private options: XtermOptions, private sendCb: () => void) {}
+    constructor(
+        private options: XtermOptions,
+        private sendCb: () => void
+    ) {}
 
     dispose() {
         for (const d of this.disposables) {
@@ -141,7 +158,7 @@ export class Xterm {
     @bind
     public open(parent: HTMLElement) {
         this.terminal = new Terminal(this.options.termOptions);
-        const { terminal, fitAddon, overlayAddon } = this;
+        const { terminal, fitAddon, overlayAddon, clipboardAddon, webLinksAddon } = this;
         window.term = terminal as TtydTerminal;
         window.term.fit = () => {
             this.fitAddon.fit();
@@ -149,10 +166,41 @@ export class Xterm {
 
         terminal.loadAddon(fitAddon);
         terminal.loadAddon(overlayAddon);
-        terminal.loadAddon(new WebLinksAddon());
+        terminal.loadAddon(clipboardAddon);
+        terminal.loadAddon(webLinksAddon);
+
+        // KK: apply terminal options from the url (fontSize, theme, ...) before the first fit. They're
+        // otherwise only applied once the server sends its preferences, which is after the shell was
+        // spawned with the size measured at the default font, so the first screen wraps at the wrong width.
+        const { clientOptions } = this.options;
+        for (const [key, value] of Object.entries(this.parseOptsFromUrlQuery(window.location.search))) {
+            if (key in clientOptions) continue;
+            terminal.options[key] = value instanceof Object ? { ...terminal.options[key], ...value } : value;
+        }
 
         terminal.open(parent);
+        terminal.loadAddon(this.touchAddon);
+        this.syncBackground();
         fitAddon.fit();
+    }
+
+    // KK: paint the page with the terminal background so the padding around xterm doesn't show white
+    @bind
+    private syncBackground() {
+        const background = this.terminal.options.theme?.background;
+        if (background) document.body.style.backgroundColor = background;
+    }
+
+    // KK: on mobile the soft keyboard shrinks the visual viewport but not the layout viewport,
+    // so the prompt ends up hidden behind the keyboard. Size the page to the visual viewport instead.
+    @bind
+    private onVisualViewportResize() {
+        const vv = window.visualViewport;
+        if (!vv) return;
+        document.documentElement.style.height = `${vv.height}px`;
+        window.scrollTo(0, 0);
+        this.fitAddon.fit();
+        this.terminal.scrollToBottom();
     }
 
     @bind
@@ -186,6 +234,9 @@ export class Xterm {
             })
         );
         register(addEventListener(window, 'resize', () => fitAddon.fit()));
+        if (this.isTouch && window.visualViewport) {
+            register(addEventListener(window.visualViewport, 'resize', this.onVisualViewportResize));
+        }
         register(addEventListener(window, 'beforeunload', this.onWindowUnload));
     }
 
@@ -199,13 +250,13 @@ export class Xterm {
             terminal.write(data, () => {
                 this.pending = Math.max(this.pending - 1, 0);
                 if (this.pending < lowWater) {
-                    this.socket?.send(textEncoder.encode(Command.PAUSE));
+                    this.socket?.send(textEncoder.encode(Command.RESUME));
                 }
             });
             this.pending++;
             this.written = 0;
             if (this.pending > highWater) {
-                this.socket?.send(textEncoder.encode(Command.RESUME));
+                this.socket?.send(textEncoder.encode(Command.PAUSE));
             }
         } else {
             terminal.write(data);
@@ -218,7 +269,10 @@ export class Xterm {
         if (socket?.readyState !== WebSocket.OPEN) return;
 
         if (typeof data === 'string') {
-            socket.send(textEncoder.encode(Command.INPUT + data));
+            const payload = new Uint8Array(data.length * 3 + 1);
+            payload[0] = Command.INPUT.charCodeAt(0);
+            const stats = textEncoder.encodeInto(data, payload.subarray(1));
+            socket.send(payload.subarray(0, (stats.written as number) + 1));
         } else {
             const payload = new Uint8Array(data.length + 1);
             payload[0] = Command.INPUT.charCodeAt(0);
@@ -272,6 +326,8 @@ export class Xterm {
         if (event.code !== 1000 && doReconnect) {
             overlayAddon.showOverlay('Reconnecting...');
             refreshToken().then(connect);
+        } else if (this.closeOnDisconnect) {
+            window.close();
         } else {
             const { terminal } = this;
             const keyDispose = terminal.onKey(e => {
@@ -287,6 +343,40 @@ export class Xterm {
     }
 
     @bind
+    private parseOptsFromUrlQuery(query: string): Preferences {
+        const { terminal } = this;
+        const { clientOptions } = this.options;
+        const prefs = {} as Preferences;
+        const queryObj = Array.from(new URLSearchParams(query) as unknown as Iterable<[string, string]>);
+
+        for (const [k, queryVal] of queryObj) {
+            let v = clientOptions[k];
+            if (v === undefined) v = terminal.options[k];
+            switch (typeof v) {
+                case 'boolean':
+                    prefs[k] = queryVal === 'true' || queryVal === '1';
+                    break;
+                case 'number':
+                case 'bigint':
+                    prefs[k] = Number.parseInt(queryVal, 10);
+                    break;
+                case 'string':
+                    prefs[k] = queryVal;
+                    break;
+                case 'object':
+                    prefs[k] = JSON.parse(queryVal);
+                    break;
+                default:
+                    console.warn(`[ttyd] maybe unknown option: ${k}=${queryVal}, treating as string`);
+                    prefs[k] = queryVal;
+                    break;
+            }
+        }
+
+        return prefs;
+    }
+
+    @bind
     private onSocketData(event: MessageEvent) {
         const { textDecoder } = this;
         const rawData = event.data as ArrayBuffer;
@@ -295,6 +385,7 @@ export class Xterm {
         let output = '';
         switch (cmd) {
             case Command.OUTPUT:
+                // KK: surface `kk_output@` markers to the console for lab checks
                 output = textDecoder.decode(data);
                 if (output.includes('kk_output@') && !output.includes('kk_output@$')) {
                     console.log(`[ttyd] ${output}`);
@@ -309,6 +400,7 @@ export class Xterm {
                 this.applyPreferences({
                     ...this.options.clientOptions,
                     ...JSON.parse(textDecoder.decode(data)),
+                    ...this.parseOptsFromUrlQuery(window.location.search),
                 } as Preferences);
                 break;
             default:
@@ -324,6 +416,8 @@ export class Xterm {
             this.zmodemAddon = new ZmodemAddon({
                 zmodem: prefs.enableZmodem,
                 trzsz: prefs.enableTrzsz,
+                windows: prefs.isWindows,
+                trzszDragInitTimeout: prefs.trzszDragInitTimeout,
                 onSend: this.sendCb,
                 sender: this.sendData,
                 writer: this.writeData,
@@ -331,8 +425,8 @@ export class Xterm {
             this.writeFunc = data => this.zmodemAddon?.consume(data);
             terminal.loadAddon(register(this.zmodemAddon));
         }
-        Object.keys(prefs).forEach(key => {
-            const value = prefs[key];
+
+        for (const [key, value] of Object.entries(prefs)) {
             switch (key) {
                 case 'rendererType':
                     this.setRendererType(value);
@@ -362,10 +456,21 @@ export class Xterm {
                 case 'enableTrzsz':
                     if (value) console.log('[ttyd] trzsz enabled');
                     break;
+                case 'trzszDragInitTimeout':
+                    if (value) console.log(`[ttyd] trzsz drag init timeout: ${value}`);
+                    break;
                 case 'enableSixel':
                     if (value) {
                         terminal.loadAddon(register(new ImageAddon()));
                         console.log('[ttyd] Sixel enabled');
+                    }
+                    break;
+                case 'closeOnDisconnect':
+                    if (value) {
+                        console.log('[ttyd] close on disconnect enabled (Reconnect disabled)');
+                        this.closeOnDisconnect = true;
+                        this.reconnect = false;
+                        this.doReconnect = false;
                     }
                     break;
                 case 'titleFixed':
@@ -373,6 +478,24 @@ export class Xterm {
                     console.log(`[ttyd] setting fixed title: ${value}`);
                     this.titleFixed = value;
                     document.title = value;
+                    break;
+                case 'isWindows':
+                    if (value) console.log('[ttyd] is windows');
+                    break;
+                case 'unicodeVersion':
+                    switch (value) {
+                        case 6:
+                        case '6':
+                            console.log('[ttyd] setting Unicode version: 6');
+                            break;
+                        case 11:
+                        case '11':
+                        default:
+                            console.log('[ttyd] setting Unicode version: 11');
+                            terminal.loadAddon(new Unicode11Addon());
+                            terminal.unicode.activeVersion = '11';
+                            break;
+                    }
                     break;
                 default:
                     console.log(`[ttyd] option: ${key}=${JSON.stringify(value)}`);
@@ -382,9 +505,10 @@ export class Xterm {
                         terminal.options[key] = value;
                     }
                     if (key.indexOf('font') === 0) fitAddon.fit();
+                    if (key === 'theme') this.syncBackground();
                     break;
             }
-        });
+        }
     }
 
     @bind
@@ -429,9 +553,11 @@ export class Xterm {
                 terminal.loadAddon(this.webglAddon);
                 console.log('[ttyd] WebGL renderer loaded');
             } catch (e) {
-                console.log('[ttyd] WebGL renderer could not be loaded, falling back to canvas renderer', e);
+                // KK: fall back to the dom renderer, not canvas: the canvas addon sizes its layers for
+                // devicePixelRatio 1 but draws glyphs at the real ratio, so on high-dpi phones the text
+                // comes out 2-3x too big and clipped.
+                console.log('[ttyd] WebGL renderer could not be loaded, falling back to dom renderer', e);
                 disposeWebglRenderer();
-                enableCanvasRenderer();
             }
         };
 

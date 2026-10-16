@@ -1,12 +1,14 @@
 import { bind } from 'decko';
 import { saveAs } from 'file-saver';
-import { IDisposable, ITerminalAddon, Terminal } from 'xterm';
+import { IDisposable, ITerminalAddon, Terminal } from '@xterm/xterm';
 import * as Zmodem from 'zmodem.js/src/zmodem_browser';
 import { TrzszFilter } from 'trzsz';
 
 export interface ZmodeOptions {
     zmodem: boolean;
     trzsz: boolean;
+    windows: boolean;
+    trzszDragInitTimeout: number;
     onSend: () => void;
     sender: (data: string | Uint8Array) => void;
     writer: (data: string | Uint8Array) => void;
@@ -54,6 +56,11 @@ export class ZmodemAddon implements ITerminalAddon {
         this.terminal.focus();
     }
 
+    private addDisposableListener(target: EventTarget, type: string, listener: EventListener) {
+        target.addEventListener(type, listener);
+        this.disposables.push({ dispose: () => target.removeEventListener(type, listener) });
+    }
+
     @bind
     private trzszInit() {
         const { terminal } = this;
@@ -68,6 +75,17 @@ export class ZmodemAddon implements ITerminalAddon {
             },
             sendToServer: data => sender(data),
             terminalColumns: terminal.cols,
+            isWindowsShell: this.options.windows,
+            dragInitTimeout: this.options.trzszDragInitTimeout,
+        });
+        const element = terminal.element as EventTarget;
+        this.addDisposableListener(element, 'dragover', event => event.preventDefault());
+        this.addDisposableListener(element, 'drop', event => {
+            event.preventDefault();
+            this.trzszFilter
+                .uploadFiles((event as DragEvent).dataTransfer?.items as DataTransferItemList)
+                .then(() => console.log('[ttyd] upload success'))
+                .catch(err => console.log('[ttyd] upload failed: ' + err));
         });
         this.disposables.push(terminal.onResize(size => this.trzszFilter.setTerminalColumns(size.cols)));
     }

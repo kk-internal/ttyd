@@ -78,12 +78,12 @@ Cross platform: macOS, Linux, FreeBSD/OpenBSD, OpenWrt/LEDE, Windows
       Allow client to send command line arguments in URL (eg: http://localhost:7681?arg=foo&arg=bar)
 
 .PP
--R, --readonly
-      Do not allow clients to write to the TTY
+-W, --writable
+      Allow clients to write to the TTY (readonly by default)
 
 .PP
 -t, --client-option 
-      Send option to client (format: key=value), repeat to add more options, see \fBCLIENT OPTOINS\fP for details
+      Send option to client (format: key=value), repeat to add more options, see \fBCLIENT OPTIONS\fP for details
 
 .PP
 -T, --terminal-type
@@ -102,6 +102,10 @@ Cross platform: macOS, Linux, FreeBSD/OpenBSD, OpenWrt/LEDE, Windows
       Accept only one client and exit on disconnection
 
 .PP
+-q, --exit-no-conn
+      Exit on all clients disconnection
+
+.PP
 -B, --browser
       Open terminal with the default system browser
 
@@ -115,7 +119,11 @@ Cross platform: macOS, Linux, FreeBSD/OpenBSD, OpenWrt/LEDE, Windows
 
 .PP
 -P, --ping-interval
-      Websocket ping interval(sec) (default: 300)
+      Websocket ping interval(sec) (default: 5)
+
+.PP
+-f, --srv-buf-size
+      Maximum chunk of file (in bytes) that can be sent at once, a larger value may improve throughput (default: 4096)
 
 .PP
 -6, --ipv6
@@ -150,7 +158,7 @@ Cross platform: macOS, Linux, FreeBSD/OpenBSD, OpenWrt/LEDE, Windows
       Print this text and exit
 
 
-.SH CLIENT OPTOINS
+.SH CLIENT OPTIONS
 .PP
 ttyd has a mechanism to pass server side command-line arguments to the browser page which is called \fBclient options\fP:
 
@@ -185,9 +193,15 @@ ttyd has a mechanism to pass server side command-line arguments to the browser p
 \[la]https://en.wikipedia.org/wiki/Sixel\[ra] image output support (Usage
 \[la]https://saitoha.github.io/libsixel/\[ra])
 .IP \(bu 2
+\fB\fC-t closeOnDisconnect=true\fR: close the terminal on disconnection, this will disable reconnect
+.IP \(bu 2
 \fB\fC-t titleFixed=hello\fR: set a fixed title for the browser window
 .IP \(bu 2
 \fB\fC-t fontSize=20\fR: change the font size of the terminal
+.IP \(bu 2
+\fB\fC-t unicodeVersion=11\fR: set xterm unicode support level (default: 11, use 6 to disable unicode addon)
+.IP \(bu 2
+\fB\fC-t trzszDragInitTimeout=3000\fR: set the timeout in milliseconds for initializing drag and drop files to upload. (default: 3000)
 
 .RE
 
@@ -239,7 +253,7 @@ Then open http://localhost:8080 with a browser, you will get a bash shell with d
 .IP \(bu 2
 If you want to login with your system accounts on the web browser, run \fB\fCttyd login\fR\&.
 .IP \(bu 2
-You can even run a none shell command like vim, try: \fB\fCttyd vim\fR, the web browser will show you a vim editor.
+You can even run a non-shell command like vim, try: \fB\fCttyd vim\fR, the web browser will show you a vim editor.
 .IP \(bu 2
 Sharing single process with multiple clients: \fB\fCttyd tmux new -A -s ttyd vim\fR, run \fB\fCtmux new -A -s ttyd\fR to connect to the tmux session from terminal.
 

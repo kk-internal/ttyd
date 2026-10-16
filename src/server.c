@@ -12,6 +12,7 @@
 #include <sys/stat.h>
 
 #include "utils.h"
+#include "compat.h"
 
 #ifndef TTYD_VERSION
 #define TTYD_VERSION "unknown"
@@ -65,24 +66,26 @@ static const struct option options[] = {{"port", required_argument, NULL, 'p'},
 #if LWS_LIBRARY_VERSION_NUMBER >= 4000000
                                         {"ping-interval", required_argument, NULL, 'P'},
 #endif
+                                        {"srv-buf-size", required_argument, NULL, 'f'},
                                         {"ipv6", no_argument, NULL, '6'},
                                         {"ssl", no_argument, NULL, 'S'},
                                         {"ssl-cert", required_argument, NULL, 'C'},
                                         {"ssl-key", required_argument, NULL, 'K'},
                                         {"ssl-ca", required_argument, NULL, 'A'},
                                         {"url-arg", no_argument, NULL, 'a'},
-                                        {"readonly", no_argument, NULL, 'R'},
+                                        {"writable", no_argument, NULL, 'W'},
                                         {"terminal-type", required_argument, NULL, 'T'},
                                         {"client-option", required_argument, NULL, 't'},
                                         {"check-origin", no_argument, NULL, 'O'},
                                         {"max-clients", required_argument, NULL, 'm'},
                                         {"once", no_argument, NULL, 'o'},
+                                        {"exit-no-conn", no_argument, NULL, 'q'},
                                         {"browser", no_argument, NULL, 'B'},
                                         {"debug", required_argument, NULL, 'd'},
                                         {"version", no_argument, NULL, 'v'},
                                         {"help", no_argument, NULL, 'h'},
                                         {NULL, 0, 0, 0}};
-static const char *opt_string = "p:i:c:H:u:g:s:w:I:b:P:6aSC:K:A:Rt:T:Om:oBd:vh";
+static const char *opt_string = "p:i:U:c:H:u:g:s:w:I:b:P:f:6aSC:K:A:Wt:T:Om:oqBd:vh";
 
 static void print_help() {
   // clang-format off
@@ -102,18 +105,20 @@ static void print_help() {
           "    -s, --signal            Signal to send to the command when exit it (default: 1, SIGHUP)\n"
           "    -w, --cwd               Working directory to be set for the child program\n"
           "    -a, --url-arg           Allow client to send command line arguments in URL (eg: http://localhost:7681?arg=foo&arg=bar)\n"
-          "    -R, --readonly          Do not allow clients to write to the TTY\n"
+          "    -W, --writable          Allow clients to write to the TTY (readonly by default)\n"
           "    -t, --client-option     Send option to client (format: key=value), repeat to add more options\n"
           "    -T, --terminal-type     Terminal type to report, default: xterm-256color\n"
           "    -O, --check-origin      Do not allow websocket connection from different origin\n"
           "    -m, --max-clients       Maximum clients to support (default: 0, no limit)\n"
           "    -o, --once              Accept only one client and exit on disconnection\n"
+          "    -q, --exit-no-conn      Exit on all clients disconnection\n"
           "    -B, --browser           Open terminal with the default system browser\n"
           "    -I, --index             Custom index.html path\n"
           "    -b, --base-path         Expected base path for requests coming from a reverse proxy (eg: /mounted/here, max length: 128)\n"
 #if LWS_LIBRARY_VERSION_NUMBER >= 4000000
           "    -P, --ping-interval     Websocket ping interval(sec) (default: 5)\n"
 #endif
+          "    -f, --srv-buf-size      Maximum chunk of file (in bytes) that can be sent at once, a larger value may improve throughput (default: 4096)\n"
 #ifdef LWS_WITH_IPV6
           "    -6, --ipv6              Enable IPv6 support\n"
 #endif
@@ -148,10 +153,12 @@ static void print_config() {
   if (server->auth_header != NULL) lwsl_notice("  auth header: %s\n", server->auth_header);
   if (server->check_origin) lwsl_notice("  check origin: true\n");
   if (server->url_arg) lwsl_notice("  allow url arg: true\n");
-  if (server->readonly) lwsl_notice("  readonly: true\n");
   if (server->max_clients > 0) lwsl_notice("  max clients: %d\n", server->max_clients);
   if (server->once) lwsl_notice("  once: true\n");
+  if (server->exit_no_conn) lwsl_notice("  exit_no_conn: true\n");
   if (server->index != NULL) lwsl_notice("  custom index.html: %s\n", server->index);
+  if (server->cwd != NULL) lwsl_notice("  working directory: %s\n", server->cwd);
+  if (!server->writable) lwsl_warn("The --writable option is not set, will start in readonly mode\n");
 }
 
 static struct server *server_new(int argc, char **argv, int start) {
@@ -163,7 +170,7 @@ static struct server *server_new(int argc, char **argv, int start) {
   memset(ts, 0, sizeof(struct server));
   ts->client_count = 0;
   ts->sig_code = SIGHUP;
-  sprintf(ts->terminal_type, "%s", "xterm-256color");
+  snprintf(ts->terminal_type, sizeof(ts->terminal_type), "%s", "xterm-256color");
   get_sig_name(ts->sig_code, ts->sig_name, sizeof(ts->sig_name));
   if (start == argc) return ts;
 
@@ -184,7 +191,7 @@ static struct server *server_new(int argc, char **argv, int start) {
   char *ptr = ts->command;
   for (int i = 0; i < cmd_argc; i++) {
     size_t len = strlen(ts->argv[i]);
-    ptr = memcpy(ptr, ts->argv[i], len + 1) + len;
+    ptr = (char *)memcpy(ptr, ts->argv[i], len + 1) + len;
     if (i != cmd_argc - 1) {
       *ptr++ = ' ';
     }
@@ -321,7 +328,7 @@ int main(int argc, char **argv) {
 #ifndef LWS_WITHOUT_EXTENSIONS
   info.extensions = extensions;
 #endif
-  info.max_http_header_data = 20480;
+  info.max_http_header_data = 65535;
 
   int debug_level = LLL_ERR | LLL_WARN | LLL_NOTICE;
   char iface[128] = "";
@@ -333,6 +340,10 @@ int main(int argc, char **argv) {
   char ca_path[1024] = "";
 
   struct json_object *client_prefs = json_object_new_object();
+
+#ifdef _WIN32
+  json_object_object_add(client_prefs, "isWindows", json_object_new_boolean(true));
+#endif
 
   // parse command line options
   int c;
@@ -350,8 +361,8 @@ int main(int argc, char **argv) {
       case 'a':
         server->url_arg = true;
         break;
-      case 'R':
-        server->readonly = true;
+      case 'W':
+        server->writable = true;
         break;
       case 'O':
         server->check_origin = true;
@@ -361,6 +372,9 @@ int main(int argc, char **argv) {
         break;
       case 'o':
         server->once = true;
+        break;
+      case 'q':
+        server->exit_no_conn = true;
         break;
       case 'B':
         browser = true;
@@ -414,8 +428,9 @@ int main(int argc, char **argv) {
       case 'I':
         if (!strncmp(optarg, "~/", 2)) {
           const char *home = getenv("HOME");
-          server->index = malloc(strlen(home) + strlen(optarg) - 1);
-          sprintf(server->index, "%s%s", home, optarg + 1);
+          size_t index_len = strlen(home) + strlen(optarg);
+          server->index = malloc(index_len);
+          snprintf(server->index, index_len, "%s%s", home, optarg + 1);
         } else {
           server->index = strdup(optarg);
         }
@@ -452,6 +467,14 @@ int main(int argc, char **argv) {
         retry.secs_since_valid_hangup = interval + 7;
       } break;
 #endif
+      case 'f': {
+        int serv_buf_size = parse_int("srv-buf-size", optarg);
+        if (serv_buf_size < 0) {
+          fprintf(stderr, "ttyd: invalid srv-buf-size: %s\n", optarg);
+          return -1;
+        }
+        info.pt_serv_buf_size = serv_buf_size;
+      } break;
       case '6':
         info.options &= ~(LWS_SERVER_OPTION_DISABLE_IPV6);
         break;
@@ -512,7 +535,7 @@ int main(int argc, char **argv) {
   lws_set_log_level(debug_level, NULL);
 
   char server_hdr[128] = "";
-  sprintf(server_hdr, "ttyd/%s (libwebsockets/%s)", TTYD_VERSION, LWS_LIBRARY_VERSION);
+  snprintf(server_hdr, sizeof(server_hdr), "ttyd/%s (libwebsockets/%s)", TTYD_VERSION, LWS_LIBRARY_VERSION);
   info.server_string = server_hdr;
 
 #if LWS_LIBRARY_VERSION_NUMBER < 4000000
@@ -542,9 +565,9 @@ int main(int argc, char **argv) {
   if (ssl) {
     info.ssl_cert_filepath = cert_path;
     info.ssl_private_key_filepath = key_path;
-    #ifndef LWS_WITH_MBEDTLS
+#ifndef LWS_WITH_MBEDTLS
     info.ssl_options_set = SSL_OP_NO_TLSv1 | SSL_OP_NO_TLSv1_1;
-    #endif
+#endif
     if (strlen(ca_path) > 0) {
       info.ssl_ca_filepath = ca_path;
       info.options |= LWS_SERVER_OPTION_REQUIRE_VALID_OPENSSL_CLIENT_CERT;
@@ -585,7 +608,7 @@ int main(int argc, char **argv) {
 
   if (browser) {
     char url[30];
-    sprintf(url, "%s://localhost:%d", ssl ? "https" : "http", port);
+    snprintf(url, sizeof(url), "%s://localhost:%d", ssl ? "https" : "http", port);
     open_uri(url);
   }
 

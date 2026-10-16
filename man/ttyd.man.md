@@ -50,11 +50,11 @@ ttyd 1 "September 2016" ttyd "User Manual"
   -a, --url-arg
       Allow client to send command line arguments in URL (eg: http://localhost:7681?arg=foo&arg=bar)
 
-  -R, --readonly
-      Do not allow clients to write to the TTY
+  -W, --writable
+      Allow clients to write to the TTY (readonly by default)
 
   -t, --client-option <key=value>
-      Send option to client (format: key=value), repeat to add more options, see **CLIENT OPTOINS** for details
+      Send option to client (format: key=value), repeat to add more options, see **CLIENT OPTIONS** for details
 
   -T, --terminal-type
       Terminal type to report, default: xterm-256color
@@ -68,6 +68,9 @@ ttyd 1 "September 2016" ttyd "User Manual"
   -o, --once
       Accept only one client and exit on disconnection
 
+  -q, --exit-no-conn
+      Exit on all clients disconnection
+
   -B, --browser
       Open terminal with the default system browser
 
@@ -78,7 +81,10 @@ ttyd 1 "September 2016" ttyd "User Manual"
       Expected base path for requests coming from a reverse proxy (eg: /mounted/here, max length: 128)
 
   -P, --ping-interval
-      Websocket ping interval(sec) (default: 300)
+      Websocket ping interval(sec) (default: 5)
+
+  -f, --srv-buf-size
+      Maximum chunk of file (in bytes) that can be sent at once, a larger value may improve throughput (default: 4096)
 
   -6, --ipv6
       Enable IPv6 support
@@ -104,7 +110,7 @@ ttyd 1 "September 2016" ttyd "User Manual"
   -h, --help
       Print this text and exit
 
-# CLIENT OPTOINS
+# CLIENT OPTIONS
 ttyd has a mechanism to pass server side command-line arguments to the browser page which is called **client options**:
 
 ```bash
@@ -120,8 +126,11 @@ ttyd has a mechanism to pass server side command-line arguments to the browser p
 - `-t enableZmodem=true`: enable [ZMODEM](https://en.wikipedia.org/wiki/ZMODEM) / [lrzsz](https://ohse.de/uwe/software/lrzsz.html) file transfer support
 - `-t enableTrzsz=true`: enable [trzsz](https://trzsz.github.io) file transfer support
 - `-t enableSixel=true`: enable [Sixel](https://en.wikipedia.org/wiki/Sixel) image output support ([Usage](https://saitoha.github.io/libsixel/))
+- `-t closeOnDisconnect=true`: close the terminal on disconnection, this will disable reconnect
 - `-t titleFixed=hello`: set a fixed title for the browser window
 - `-t fontSize=20`: change the font size of the terminal
+- `-t unicodeVersion=11`: set xterm unicode support level (default: 11, use 6 to disable unicode addon)
+- `-t trzszDragInitTimeout=3000`: set the timeout in milliseconds for initializing drag and drop files to upload. (default: 3000) 
 
 ## Advanced usage
 
@@ -147,7 +156,7 @@ ttyd -p 8080 bash -x
   Then open http://localhost:8080 with a browser, you will get a bash shell with debug mode enabled. More examples:
 
   - If you want to login with your system accounts on the web browser, run `ttyd login`.
-  - You can even run a none shell command like vim, try: `ttyd vim`, the web browser will show you a vim editor.
+  - You can even run a non-shell command like vim, try: `ttyd vim`, the web browser will show you a vim editor.
   - Sharing single process with multiple clients: `ttyd tmux new -A -s ttyd vim`, run `tmux new -A -s ttyd` to connect to the tmux session from terminal.
 
 # SSL how-to

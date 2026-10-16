@@ -12,15 +12,17 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-node@v3
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
-          node-version: '16.x'
+          node-version: 18
       - name: Run yarn install, check and build
         run: |
-          cd html
+          corepack enable
+          corepack prepare yarn@stable --activate
           yarn install
           yarn run check
           yarn run build
+        working-directory: html

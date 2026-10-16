@@ -9,6 +9,7 @@
 #include "pty.h"
 #include "server.h"
 #include "utils.h"
+#include "compat.h"
 
 // initial message list
 static char initial_cmds[] = {SET_WINDOW_TITLE, SET_PREFERENCES};
@@ -23,10 +24,10 @@ static int send_initial_message(struct lws *wsi, int index) {
   switch (cmd) {
     case SET_WINDOW_TITLE:
       gethostname(buffer, sizeof(buffer) - 1);
-      n = sprintf((char *)p, "%c%s (%s)", cmd, server->command, buffer);
+      n = snprintf((char *)p, 1 + 4096, "%c%s (%s)", cmd, server->command, buffer);
       break;
     case SET_PREFERENCES:
-      n = sprintf((char *)p, "%c%s", cmd, server->prefs_json);
+      n = snprintf((char *)p, 1 + 4096, "%c%s", cmd, server->prefs_json);
       break;
     default:
       break;
@@ -57,9 +58,9 @@ static bool check_host_origin(struct lws *wsi) {
   int port;
   if (lws_parse_uri(buf, &prot, &address, &port, &path)) return false;
   if (port == 80 || port == 443) {
-    sprintf(buf, "%s", address);
+    snprintf(buf, sizeof(buf), "%s", address);
   } else {
-    sprintf(buf, "%s:%d", address, port);
+    snprintf(buf, sizeof(buf), "%s:%d", address, port);
   }
 
   char host_buf[256];
@@ -106,6 +107,9 @@ static void process_exit_cb(pty_process *process) {
 
 done:
   pty_ctx_free(ctx);
+
+  // if we are going to exit, do it now.
+  if (force_exit) exit(0);
 }
 
 static char **build_args(struct pss_tty *pss) {
@@ -306,7 +310,7 @@ int callback_tty(struct lws *wsi, enum lws_callback_reasons reason, void *user, 
 
       switch (command) {
         case INPUT:
-          if (server->readonly) break;
+          if (!server->writable) break;
           int err = pty_write(pss->process, pty_buf_init(pss->buffer + 1, pss->len - 1));
           if (err) {
             lwsl_err("uv_write: %s (%s)\n", uv_err_name(err), uv_strerror(err));
@@ -379,11 +383,18 @@ int callback_tty(struct lws *wsi, enum lws_callback_reasons reason, void *user, 
         }
       }
 
-      if (server->once && server->client_count == 0) {
-        lwsl_notice("exiting due to the --once option.\n");
-        force_exit = true;
+      if ((server->once || server->exit_no_conn) && server->client_count == 0) {
+        lwsl_notice("exiting due to the --once/--exit-no-conn option.\n");
+
+        // stop accepting new ws connections
         lws_cancel_service(context);
-        exit(0);
+
+        if (process_running(pss->process)) {
+          force_exit = true;
+          lwsl_notice("send ^C to force exit.\n");
+        } else {
+          exit(0);
+        }
       }
       break;
 

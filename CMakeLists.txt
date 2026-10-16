@@ -1,39 +1,36 @@
-cmake_minimum_required(VERSION 2.8)
+cmake_minimum_required(VERSION 3.12.0)
 
-if(${CMAKE_VERSION} VERSION_LESS "3.12.0")
-    project(ttyd C) 
-    set(PROJECT_VERSION_MAJOR "1")
-    set(PROJECT_VERSION_MINOR "7")
-    set(PROJECT_VERSION_PATCH "3")
-    set(PROJECT_VERSION "${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}.${PROJECT_VERSION_PATCH}")
-else()
-    cmake_policy(SET CMP0048 NEW)
-    project(ttyd VERSION 1.7.3 LANGUAGES C)
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+
+project(ttyd VERSION 1.7.7 LANGUAGES C)
+
+set(TTYD_VERSION "${PROJECT_VERSION}")
+
+include(GetGitVersion)
+get_git_version(GIT_VERSION SEM_VER)
+get_git_head(GIT_COMMIT)
+if("${SEM_VER}" VERSION_GREATER "${TTYD_VERSION}")
+    set(TTYD_VERSION "${SEM_VER}")
+endif()
+if(NOT "${GIT_COMMIT}" STREQUAL "")
+    set(TTYD_VERSION "${TTYD_VERSION}-${GIT_COMMIT}")
 endif()
 
-find_package(Git)
-if(GIT_FOUND)
-    execute_process(
-            COMMAND ${GIT_EXECUTABLE} --git-dir ${CMAKE_CURRENT_SOURCE_DIR}/.git rev-parse --short HEAD
-            RESULT_VARIABLE GIT_RET
-            OUTPUT_VARIABLE GIT_COMMIT
-            OUTPUT_STRIP_TRAILING_WHITESPACE
-            ERROR_QUIET
-    )
-    if("${GIT_RET}" STREQUAL "0")
-        set(PROJECT_VERSION "${PROJECT_VERSION}-${GIT_COMMIT}")
-    endif()
-endif()
-
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -D_GNU_SOURCE")
-if(CMAKE_VERSION VERSION_LESS "3.1")
-    if ("${CMAKE_C_COMPILER_ID}" STREQUAL "GNU")
-        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=gnu99")
+if(NOT MSVC)
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -D_GNU_SOURCE")
+    if(CMAKE_VERSION VERSION_LESS "3.1")
+        if ("${CMAKE_C_COMPILER_ID}" STREQUAL "GNU")
+            set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=gnu99")
+        else()
+            set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=c99")
+        endif()
     else()
-        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=c99")
+        set(CMAKE_C_STANDARD 99)
     endif()
 else()
-    set(CMAKE_C_STANDARD 99)
+    # MSVC: suppress common warnings for C99 code
+    add_compile_options(/W3 /wd4996 /wd4267 /wd4244)
+    add_compile_definitions(_CRT_SECURE_NO_WARNINGS _GNU_SOURCE)
 endif()
 
 set(SOURCE_FILES src/utils.c src/pty.c src/protocol.c src/http.c src/server.c)
@@ -62,7 +59,17 @@ find_package(ZLIB REQUIRED)
 find_package(Libwebsockets 3.2.0 REQUIRED)
 
 set(INCLUDE_DIRS ${ZLIB_INCLUDE_DIR} ${LIBWEBSOCKETS_INCLUDE_DIRS} ${JSON-C_INCLUDE_DIRS} ${LIBUV_INCLUDE_DIRS})
-set(LINK_LIBS ${ZLIB_LIBRARIES} ${LIBWEBSOCKETS_LIBRARIES} ${JSON-C_LIBRARIES} ${LIBUV_LIBRARIES})
+if(MSVC)
+    # vcpkg's LIBWEBSOCKETS_LIBRARIES lists both 'websockets' and 'websockets_shared'
+    # but only one target exists per triplet, so resolve the correct one.
+    if(TARGET websockets_shared)
+        set(LINK_LIBS ${ZLIB_LIBRARIES} websockets_shared ${JSON-C_LIBRARIES} ${LIBUV_LIBRARIES})
+    elseif(TARGET websockets)
+        set(LINK_LIBS ${ZLIB_LIBRARIES} websockets ${JSON-C_LIBRARIES} ${LIBUV_LIBRARIES})
+    endif()
+else()
+    set(LINK_LIBS ${ZLIB_LIBRARIES} ${LIBWEBSOCKETS_LIBRARIES} ${JSON-C_LIBRARIES} ${LIBUV_LIBRARIES})
+endif()
 
 set (CMAKE_REQUIRED_INCLUDES ${INCLUDE_DIRS})
 include(CheckSymbolExists)
@@ -79,7 +86,18 @@ if(LWS_OPENSSL_ENABLED AND NOT LWS_MBEDTLS_ENABLED)
 endif()
 
 if(WIN32)
-    list(APPEND LINK_LIBS shell32 ws2_32)
+    # libuv static requires dbghelp for MiniDumpWriteDump/Sym* APIs
+    list(APPEND LINK_LIBS shell32 ws2_32 dbghelp)
+    if(MSVC)
+        find_package(getopt CONFIG)
+        if(getopt_FOUND)
+            if(TARGET getopt::getopt_shared)
+                list(APPEND LINK_LIBS getopt::getopt_shared)
+            elseif(TARGET getopt::getopt_static)
+                list(APPEND LINK_LIBS getopt::getopt_static)
+            endif()
+        endif()
+    endif()
     configure_file(${CMAKE_CURRENT_SOURCE_DIR}/app.rc.in ${CMAKE_CURRENT_BINARY_DIR}/app.rc @ONLY)
     list(APPEND SOURCE_FILES ${CMAKE_CURRENT_BINARY_DIR}/app.rc)
 else()
@@ -92,7 +110,10 @@ endif()
 add_executable(${PROJECT_NAME} ${SOURCE_FILES})
 target_include_directories(${PROJECT_NAME} PUBLIC ${INCLUDE_DIRS})
 target_link_libraries(${PROJECT_NAME} ${LINK_LIBS})
-target_compile_definitions(${PROJECT_NAME} PRIVATE TTYD_VERSION="${PROJECT_VERSION}")
+target_compile_definitions(${PROJECT_NAME} PUBLIC
+    TTYD_VERSION="${TTYD_VERSION}"
+    $<$<PLATFORM_ID:Windows>:_WIN32_WINNT=0xa00 WINVER=0xa00>
+)
 
 include(GNUInstallDirs)
 
