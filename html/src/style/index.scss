@@ -4,6 +4,10 @@ body {
   min-height: 100%;
   margin: 0;
   overflow: hidden;
+  // KK: stop pull-to-refresh / rubber-band scrolling and font boosting on mobile
+  overscroll-behavior: none;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
 }
 
 #terminal-container {

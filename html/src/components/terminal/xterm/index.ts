@@ -9,6 +9,7 @@ import { WebLinksAddon } from '@xterm/addon-web-links';
 import { ImageAddon } from '@xterm/addon-image';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { OverlayAddon } from './addons/overlay';
+import { TouchAddon } from './addons/touch';
 import { ZmodemAddon } from './addons/zmodem';
 
 import '@xterm/xterm/css/xterm.css';
@@ -88,6 +89,7 @@ export class Xterm {
     private overlayAddon = new OverlayAddon();
     private clipboardAddon = new ClipboardAddon();
     private webLinksAddon = new WebLinksAddon();
+    private touchAddon = new TouchAddon();
     private webglAddon?: WebglAddon;
     private canvasAddon?: CanvasAddon;
     private zmodemAddon?: ZmodemAddon;
@@ -97,7 +99,9 @@ export class Xterm {
     private opened = false;
     private title?: string;
     private titleFixed?: string;
-    private resizeOverlay = true;
+    // KK: the size overlay pops up every time the soft keyboard opens/closes, hide it on touch devices
+    private isTouch = window.matchMedia('(pointer: coarse)').matches;
+    private resizeOverlay = !this.isTouch;
     private reconnect = true;
     private doReconnect = true;
     private closeOnDisconnect = false;
@@ -165,8 +169,38 @@ export class Xterm {
         terminal.loadAddon(clipboardAddon);
         terminal.loadAddon(webLinksAddon);
 
+        // KK: apply terminal options from the url (fontSize, theme, ...) before the first fit. They're
+        // otherwise only applied once the server sends its preferences, which is after the shell was
+        // spawned with the size measured at the default font, so the first screen wraps at the wrong width.
+        const { clientOptions } = this.options;
+        for (const [key, value] of Object.entries(this.parseOptsFromUrlQuery(window.location.search))) {
+            if (key in clientOptions) continue;
+            terminal.options[key] = value instanceof Object ? { ...terminal.options[key], ...value } : value;
+        }
+
         terminal.open(parent);
+        terminal.loadAddon(this.touchAddon);
+        this.syncBackground();
         fitAddon.fit();
+    }
+
+    // KK: paint the page with the terminal background so the padding around xterm doesn't show white
+    @bind
+    private syncBackground() {
+        const background = this.terminal.options.theme?.background;
+        if (background) document.body.style.backgroundColor = background;
+    }
+
+    // KK: on mobile the soft keyboard shrinks the visual viewport but not the layout viewport,
+    // so the prompt ends up hidden behind the keyboard. Size the page to the visual viewport instead.
+    @bind
+    private onVisualViewportResize() {
+        const vv = window.visualViewport;
+        if (!vv) return;
+        document.documentElement.style.height = `${vv.height}px`;
+        window.scrollTo(0, 0);
+        this.fitAddon.fit();
+        this.terminal.scrollToBottom();
     }
 
     @bind
@@ -200,6 +234,9 @@ export class Xterm {
             })
         );
         register(addEventListener(window, 'resize', () => fitAddon.fit()));
+        if (this.isTouch && window.visualViewport) {
+            register(addEventListener(window.visualViewport, 'resize', this.onVisualViewportResize));
+        }
         register(addEventListener(window, 'beforeunload', this.onWindowUnload));
     }
 
@@ -345,9 +382,14 @@ export class Xterm {
         const rawData = event.data as ArrayBuffer;
         const cmd = String.fromCharCode(new Uint8Array(rawData)[0]);
         const data = rawData.slice(1);
-
+        let output = '';
         switch (cmd) {
             case Command.OUTPUT:
+                // KK: surface `kk_output@` markers to the console for lab checks
+                output = textDecoder.decode(data);
+                if (output.includes('kk_output@') && !output.includes('kk_output@$')) {
+                    console.log(`[ttyd] ${output}`);
+                }
                 this.writeFunc(data);
                 break;
             case Command.SET_WINDOW_TITLE:
@@ -463,6 +505,7 @@ export class Xterm {
                         terminal.options[key] = value;
                     }
                     if (key.indexOf('font') === 0) fitAddon.fit();
+                    if (key === 'theme') this.syncBackground();
                     break;
             }
         }
@@ -510,9 +553,11 @@ export class Xterm {
                 terminal.loadAddon(this.webglAddon);
                 console.log('[ttyd] WebGL renderer loaded');
             } catch (e) {
-                console.log('[ttyd] WebGL renderer could not be loaded, falling back to canvas renderer', e);
+                // KK: fall back to the dom renderer, not canvas: the canvas addon sizes its layers for
+                // devicePixelRatio 1 but draws glyphs at the real ratio, so on high-dpi phones the text
+                // comes out 2-3x too big and clipped.
+                console.log('[ttyd] WebGL renderer could not be loaded, falling back to dom renderer', e);
                 disposeWebglRenderer();
-                enableCanvasRenderer();
             }
         };
 
